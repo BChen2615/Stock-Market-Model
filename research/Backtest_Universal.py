@@ -26,7 +26,7 @@ DB_FULL_PATH = os.path.join(BASE_DIR, 'data', 'twstock.db')
 INITIAL_CAPITAL = 1_000_000
 TRANSACTION_FEE = 0.001425 # 0.1425%
 TAX_RATE = 0.003 # 0.3%
-CONFIDENCE_THRESHOLD = 0.70 # Only buy if prob > 0.55
+CONFIDENCE_THRESHOLD = 0.60 # Only buy if prob > 0.55
 
 def get_all_stock_ids():
     conn = sqlite3.connect(DB_FULL_PATH)

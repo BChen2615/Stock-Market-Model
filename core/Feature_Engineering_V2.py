@@ -128,7 +128,7 @@ def add_external_features(df, df_ext):
     
     for col in ext_cols:
         # Daily Return
-        df[f'{col}_Chg'] = df[col].pct_change()
+        df[f'{col}_Chg'] = df[col].pct_change(fill_method=None)
         
         # Drop the absolute price column immediately
         df = df.drop(columns=[col])
