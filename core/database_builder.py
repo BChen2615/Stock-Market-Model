@@ -4,266 +4,240 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import requests
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 # --- CONFIG ---
-TWDB_DIR = '../data/twstock.db'
-START_DATE = "2020-01-01"  # Recommended to set a specific date; "5y" changes over time
-# Set threshold for abnormal volatility (e.g., >20% daily change is suspicious.
-# Taiwan's limit is 10%, but set wider to account for dividends/splits).
-OUTLIER_THRESHOLD = 0.20
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TWDB_DIR = os.path.join(BASE_DIR, 'data', 'twstock.db')
+START_DATE_DEFAULT = "2020-01-01"
 
 # --- DATABASE SETUP ---
-conn = sqlite3.connect(TWDB_DIR)
-cursor = conn.cursor()
+def init_db():
+    conn = sqlite3.connect(TWDB_DIR)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tw_stock_prices (
+            Date DATETIME,
+            Stock_ID TEXT,
+            Open REAL,
+            High REAL,
+            Low REAL,
+            Close REAL,
+            Volume INTEGER,
+            Type TEXT,
+            PRIMARY KEY (Date, Stock_ID)
+        );
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_meta (
+            Stock_ID TEXT PRIMARY KEY,
+            Name TEXT,
+            Market TEXT,
+            Industry TEXT,
+            Updated_At DATETIME
+        );
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS data_audit_log (
+            Date DATETIME,
+            Stock_ID TEXT,
+            Reason TEXT,
+            Raw_Data TEXT
+        );
+    """)
+    conn.commit()
+    return conn
 
-# Create main data table
-cursor.execute("""
-               CREATE TABLE IF NOT EXISTS tw_stock_prices
-               (
-                   Date
-                   DATETIME,
-                   Stock_ID
-                   TEXT,
-                   Open
-                   REAL,
-                   High
-                   REAL,
-                   Low
-                   REAL,
-                   Close
-                   REAL,
-                   Volume
-                   INTEGER,
-                   Type
-                   TEXT,
-                   PRIMARY
-                   KEY
-               (
-                   Date,
-                   Stock_ID
-               )
-                   );
-               """)
-
-# Create an "Error Log Table" to record filtered abnormal data for future inspection
-cursor.execute("""
-               CREATE TABLE IF NOT EXISTS data_audit_log
-               (
-                   Date
-                   DATETIME,
-                   Stock_ID
-                   TEXT,
-                   Reason
-                   TEXT,
-                   Raw_Data
-                   TEXT
-               );
-               """)
-conn.commit()
-
-
-# --- HELPER FUNCTION: Data Cleaning and Validation ---
+# --- HELPER FUNCTION: Data Cleaning ---
 def clean_and_validate_data(df, stock_id):
-    """
-    Cleans and validates the DataFrame, returning clean data and a list of anomalies.
-    """
-    if df.empty:
-        return None, None
-
-    # 1. Basic Cleaning: Reset index and ensure date format
+    if df.empty: return None, None
     df = df.reset_index()
-    if 'Date' not in df.columns:  # yfinance sometimes uses different index names
-        return None, None
+    if 'Date' not in df.columns: return None, None
     df['Date'] = pd.to_datetime(df['Date'])
-
-    # 2. Remove future data (YF occasionally has future dates due to timezone issues)
-    df = df[df['Date'] <= datetime.now()]
-
-    # 3. Check for missing values (Drop NaNs in OHLC)
-    # Record rows to be dropped for logging
+    df = df[df['Date'] <= datetime.now() + timedelta(days=1)]
+    
     na_rows = df[df[['Open', 'High', 'Low', 'Close']].isna().any(axis=1)].copy()
-    if not na_rows.empty:
-        na_rows['Reason'] = 'Missing Values (NaN)'
-
-    # Actually drop the rows
+    if not na_rows.empty: na_rows['Reason'] = 'Missing Values'
     df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
-
     if df.empty: return None, na_rows
-
-    # 4. Price Logic Check (Sanity Check)
-    # Rule A: Price must be > 0
-    # Rule B: High must be the daily maximum (High >= Open, Close, Low)
-    # Rule C: Low must be the daily minimum (Low <= Open, Close, High)
-
+    
     mask_zero = (df['Open'] <= 0) | (df['High'] <= 0) | (df['Low'] <= 0) | (df['Close'] <= 0)
-    mask_logic_error = (df['High'] < df['Low']) | (df['High'] < df['Open']) | (df['High'] < df['Close']) | (
-                df['Low'] > df['Open']) | (df['Low'] > df['Close'])
-
-    bad_data = df[mask_zero | mask_logic_error].copy()
-    if not bad_data.empty:
-        bad_data['Reason'] = 'Logic Error (Zero or H/L invalid)'
-
-    # Filter out bad data
-    df = df[~(mask_zero | mask_logic_error)].copy()
-
-    # 5. Outlier Detection
-    # While deletion isn't mandatory, we can flag them.
-    # Calculate daily percentage change
+    mask_logic = (df['High'] < df['Low']) | (df['High'] < df['Open']) | (df['High'] < df['Close']) | (df['Low'] > df['Open']) | (df['Low'] > df['Close'])
+    bad_data = df[mask_zero | mask_logic].copy()
+    if not bad_data.empty: bad_data['Reason'] = 'Logic Error'
+    df = df[~(mask_zero | mask_logic)].copy()
+    
     df['pct_change'] = df['Close'].pct_change().abs()
-
-    # If daily volatility exceeds 50% (extreme anomaly), it's usually a data error
-    # (even with dividends/splits, a 50% single-day drop is rare).
-    # We are conservative here, only recording "extreme" glitches.
     mask_extreme = df['pct_change'] > 0.5
     extreme_data = df[mask_extreme].copy()
-    if not extreme_data.empty:
-        extreme_data['Reason'] = 'Extreme Volatility (>50%)'
-        # Optional: Decide whether to delete these; demonstrating deletion here.
-        df = df[~mask_extreme]
-
-    # Merge all bad data to write to Log
+    if not extreme_data.empty: extreme_data['Reason'] = 'Extreme Volatility'
+    df = df[~mask_extreme]
+    
     audit_logs = pd.concat([na_rows, bad_data, extreme_data]) if 'na_rows' in locals() else None
-
-    # Clean up temporary columns
-    if 'pct_change' in df.columns:
-        df = df.drop(columns=['pct_change'])
-
+    if 'pct_change' in df.columns: df = df.drop(columns=['pct_change'])
+    
     return df, audit_logs
 
+# --- HELPER: Get Last Date in DB ---
+def get_last_dates_map(conn):
+    """
+    Returns a dict {Stock_ID: Last_Date (datetime)} for all stocks.
+    """
+    try:
+        df = pd.read_sql("SELECT Stock_ID, MAX(Date) as Last_Date FROM tw_stock_prices GROUP BY Stock_ID", conn)
+        df['Last_Date'] = pd.to_datetime(df['Last_Date'])
+        return df.set_index('Stock_ID')['Last_Date'].to_dict()
+    except:
+        return {}
 
-# --- MAIN LOOP ---
-
-def process_stocks(stock_list, stock_type):
-    print(f"Starting processing for {stock_type} stocks...")
-    total = len(stock_list)
-
-    for i, code in enumerate(stock_list):
-        if len(code) != 4: continue
-
-        # Progress display
-        if i % 10 == 0:
-            print(f"Processing {code}.{stock_type} ({i}/{total})...")
-
+# --- BULK DOWNLOAD LOGIC ---
+def process_stocks_bulk(stock_list, stock_type, conn):
+    print(f"[WAIT] Starting BULK processing for {len(stock_list)} {stock_type} stocks...")
+    
+    # Pre-load existing dates to filter duplicates BEFORE insert
+    last_dates_map = get_last_dates_map(conn)
+    
+    suffix = ".TW" if stock_type == "TW" else ".TWO"
+    tickers = [f"{code}{suffix}" for code in stock_list]
+    
+    CHUNK_SIZE = 100
+    total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    
+    for i in range(0, len(tickers), CHUNK_SIZE):
+        chunk = tickers[i:i+CHUNK_SIZE]
+        print(f"  Processing chunk {i//CHUNK_SIZE + 1}/{total_chunks} ({len(chunk)} stocks)...")
+        
         try:
-            # Download data
-            ticker = f"{code}.{stock_type}"
-            df = yf.download(ticker, period="5y", auto_adjust=False, multi_level_index=False, progress=False)
+            data = yf.download(chunk, start=START_DATE_DEFAULT, group_by="ticker", auto_adjust=False, progress=False, threads=True)
+            
+            if data.empty: continue
+            
+            # Handle single ticker case
+            if len(chunk) == 1:
+                ticker = chunk[0]
+                code = ticker.replace(suffix, "")
+                clean_df, _ = clean_and_validate_data(data, code)
+                if clean_df is not None and not clean_df.empty:
+                    # Filter new data only
+                    last_date = last_dates_map.get(code)
+                    if last_date:
+                        clean_df = clean_df[clean_df['Date'] > last_date]
+                    
+                    if not clean_df.empty:
+                        clean_df["Type"] = stock_type
+                        clean_df["Stock_ID"] = code
+                        save_to_db(clean_df, conn)
+                continue
 
-            # --- Core Change: Add validation mechanism ---
-            clean_df, error_log = clean_and_validate_data(df, code)
-
-            # If data exists, write to database
-            if clean_df is not None and not clean_df.empty:
-                clean_df["Type"] = stock_type
-                clean_df["Stock_ID"] = code
-
-                # Remove unnecessary columns (Adj Close is handled by yf params, but just to be safe)
-                cols_to_keep = ["Date", "Stock_ID", "Open", "High", "Low", "Close", "Volume", "Type"]
-                # Ensure columns exist before selection
-                clean_df = clean_df[[c for c in cols_to_keep if c in clean_df.columns]]
-
-                # Write to DB (use try-except to avoid duplicate Primary Key errors)
-                try:
-                    clean_df.to_sql("tw_stock_prices", conn, if_exists="append", index=False)
-                except sqlite3.IntegrityError:
-                    # If data already exists, skip or consider updating
-                    # print(f"Data for {code} already exists, skipping duplicates.")
-                    pass
-
-            # If there is abnormal data, write to Log table
-            if error_log is not None and not error_log.empty:
-                # Convert the entire row to string for storage
-                error_log['Raw_Data'] = error_log.apply(lambda x: str(x.to_dict()), axis=1)
-                error_log['Stock_ID'] = code
-                error_log[['Date', 'Stock_ID', 'Reason', 'Raw_Data']].to_sql("data_audit_log", conn, if_exists="append",
-                                                                             index=False)
-
+            # Handle multi ticker case
+            downloaded_tickers = data.columns.levels[0]
+            
+            for ticker in downloaded_tickers:
+                df_ticker = data[ticker].copy()
+                df_ticker = df_ticker.dropna(how='all')
+                
+                if df_ticker.empty: continue
+                
+                code = ticker.replace(suffix, "")
+                clean_df, error_log = clean_and_validate_data(df_ticker, code)
+                
+                if clean_df is not None and not clean_df.empty:
+                    # --- CRITICAL FIX: Filter out existing dates ---
+                    last_date = last_dates_map.get(code)
+                    if last_date:
+                        clean_df = clean_df[clean_df['Date'] > last_date]
+                    
+                    if not clean_df.empty:
+                        clean_df["Type"] = stock_type
+                        clean_df["Stock_ID"] = code
+                        save_to_db(clean_df, conn)
+                
         except Exception as e:
-            print(f"Error processing {code}: {e}")
+            print(f"  [ERROR] Chunk failed: {e}")
 
+def save_to_db(df, conn):
+    cols_to_keep = ["Date", "Stock_ID", "Open", "High", "Low", "Close", "Volume", "Type"]
+    df = df[[c for c in cols_to_keep if c in df.columns]]
+    try:
+        # Now we can safely append because we filtered duplicates
+        df.to_sql("tw_stock_prices", conn, if_exists="append", index=False)
+    except sqlite3.IntegrityError:
+        pass
 
-# --- NEW: Get Stock Codes from TWSE/TPEX Website ---
-def get_stock_codes_list():
-    """
-    Crawls TWSE and TPEX websites to get ALL common stock codes.
-    Returns:
-        tuple: (tw_codes, two_codes)
-        tw_codes: List of strings (e.g., ['1101', '2330']) for Listed stocks
-        two_codes: List of strings (e.g., ['8069', '3293']) for OTC stocks
-    """
-    print("⏳ Crawling stock codes from TWSE/TPEX...")
+# --- STOCK LIST MANAGEMENT ---
+def get_stock_codes_list(conn, force_update=False):
+    if not force_update:
+        try:
+            df_meta = pd.read_sql("SELECT Stock_ID, Market FROM stock_meta", conn)
+            if not df_meta.empty:
+                print(f"[OK] Loaded {len(df_meta)} stocks from DB cache.")
+                tw_codes = df_meta[df_meta['Market'] == 'TW']['Stock_ID'].tolist()
+                two_codes = df_meta[df_meta['Market'] == 'TWO']['Stock_ID'].tolist()
+                return tw_codes, two_codes
+        except Exception:
+            pass 
 
-    # Mode=2: Listed (TWSE), Mode=4: OTC (TPEX)
+    print("[WAIT] Crawling stock codes from TWSE/TPEX...")
     urls = {
         "TW": "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2",
         "TWO": "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
     }
-
-    result_codes = {"TW": [], "TWO": []}
-
-    for market_type, url in urls.items():
+    
+    meta_data = []
+    import urllib3
+    urllib3.disable_warnings()
+    
+    for m_type, url in urls.items():
         try:
-            # Use requests with verify=False to bypass SSL errors
-            response = requests.get(url, verify=False)
-            
-            # Read HTML table from response content
-            dfs = pd.read_html(response.text)
-            
-            if not dfs:
-                print(f"❌ No tables found for {market_type}")
-                continue
-
+            r = requests.get(url, verify=False)
+            dfs = pd.read_html(r.text)
+            if not dfs: continue
             df = dfs[0]
-
-            # Clean Header
             df.columns = df.iloc[0]
             df = df.iloc[1:]
-
-            # Filter for Common Stocks (ESVUFR)
-            # This filters out ETFs, Warrants, TDRs, etc.
-            if 'CFICode' in df.columns:
-                df = df[df['CFICode'] == 'ESVUFR']
-
-            # Extract Codes
-            # Format: "2330 台積電" -> "2330"
-            codes_series = df['有價證券代號及名稱'].str.split(pat=r'\s+', n=1, expand=True)[0]
-
-            for code in codes_series:
-                # Ensure it's a 4-digit number (standard stock code)
+            
+            if 'CFICode' in df.columns: df = df[df['CFICode'] == 'ESVUFR']
+            
+            df[['Code', 'Name']] = df['有價證券代號及名稱'].str.split(pat=r'\s+', n=1, expand=True)
+            
+            for _, row in df.iterrows():
+                code = row['Code']
+                name = row['Name']
+                industry = row['產業別'] if '產業別' in row else None
+                
                 if code.isdigit() and len(code) == 4:
-                    result_codes[market_type].append(code)
-
-            print(f"✅ Found {len(result_codes[market_type])} {market_type} stocks.")
-
+                    meta_data.append({
+                        'Stock_ID': code,
+                        'Name': name,
+                        'Market': m_type,
+                        'Industry': industry,
+                        'Updated_At': datetime.now()
+                    })
+                    
         except Exception as e:
-            print(f"❌ Error fetching {market_type} codes: {e}")
+            print(f"[ERROR] {m_type}: {e}")
+            
+    if meta_data:
+        df_meta = pd.DataFrame(meta_data)
+        print(f"[OK] Saving {len(df_meta)} stocks to stock_meta table...")
+        df_meta.to_sql('stock_meta', conn, if_exists='replace', index=False)
+        
+        tw_codes = df_meta[df_meta['Market'] == 'TW']['Stock_ID'].tolist()
+        two_codes = df_meta[df_meta['Market'] == 'TWO']['Stock_ID'].tolist()
+        return tw_codes, two_codes
+    
+    return [], []
 
-    return result_codes["TW"], result_codes["TWO"]
-
-
-# --- EXECUTION ---
-
-# Suppress InsecureRequestWarning
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Get dynamic lists
-TW_CODES, TWO_CODES = get_stock_codes_list()
-
-# Fallback if crawling fails (optional, but good for robustness)
-# if not TW_CODES and not TWO_CODES:
-#     print("⚠️ Crawling failed. Falling back to twstock library.")
-#     TW_CODES = [c for c in twstock.twse.keys() if len(c) == 4]
-#     TWO_CODES = [c for c in twstock.tpex.keys() if len(c) == 4]
-
-# Execute for TW (Listed on TWSE)
-if TW_CODES:
-    process_stocks(TW_CODES, "TW")
-
-# Execute for TWO (Listed on TPEX)
-if TWO_CODES:
-    process_stocks(TWO_CODES, "TWO")
-
-conn.close()
-print("Database build complete.")
+if __name__ == "__main__":
+    conn = init_db()
+    TW_CODES, TWO_CODES = get_stock_codes_list(conn, force_update=False)
+    
+    if TW_CODES: process_stocks_bulk(TW_CODES, "TW", conn)
+    if TWO_CODES: process_stocks_bulk(TWO_CODES, "TWO", conn)
+    
+    conn.close()
+    print("[OK] Database build complete.")

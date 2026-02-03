@@ -114,27 +114,34 @@ def add_stationary_features(df):
 def add_external_features(df, df_ext):
     """
     Merges external data and calculates stationary features (daily returns).
+    This version handles non-synchronous trading days correctly.
     """
     if df_ext.empty:
         return df
         
-    # Merge on Date
-    # Note: df index is Date, df_ext index is Date
-    df = df.join(df_ext, how='left')
+    # 1. Reindex external data to match the main df's index (all TW trading days)
+    # This creates NaN rows for days when TW was open but US was closed.
+    df_ext_reindexed = df_ext.reindex(df.index)
     
-    # Calculate Returns for External Data
-    # We only care about the Change %, not absolute levels
+    # 2. Forward fill the gaps (e.g., US holiday, use previous day's data)
+    # FIX: Use ffill() instead of fillna(method='ffill') for pandas 2.0+
+    df_ext_filled = df_ext_reindexed.ffill()
+    
+    # 3. Calculate daily change on the filled data
     ext_cols = [c for c in df_ext.columns if 'Close' in c]
-    
     for col in ext_cols:
-        # Daily Return
-        df[f'{col}_Chg'] = df[col].pct_change(fill_method=None)
-        
-        # Drop the absolute price column immediately
-        df = df.drop(columns=[col])
-        
-    # Drop Volume columns from external data (usually less useful than price)
-    vol_cols = [c for c in df.columns if 'Volume' in c and c != 'Volume'] # Keep original Volume
+        df_ext_filled[f'{col}_Chg'] = df_ext_filled[col].pct_change(fill_method=None)
+    
+    # 4. Shift all external features by 1 day to prevent leakage
+    # This means we use "yesterday's" external data to predict "today's" TW stock
+    df_ext_final = df_ext_filled.shift(1)
+    
+    # 5. Join with the main dataframe
+    df = df.join(df_ext_final)
+    
+    # 6. Drop original external price columns, keep only the change features
+    df = df.drop(columns=[c for c in ext_cols if c in df.columns])
+    vol_cols = [c for c in df.columns if 'Volume' in c and c != 'Volume']
     df = df.drop(columns=vol_cols)
     
     return df
@@ -159,7 +166,7 @@ def add_lag_features_v2(df, lags=5):
             
     return df
 
-def prepare_training_data_v2(stock_id, target_days=1, path=DB_PATH, keep_raw_prices=False):
+def prepare_training_data_v2(stock_id, target_days=1, path=DB_PATH, keep_raw_prices=False, is_prediction_mode=False):
     # 1. Load Stock Data
     df = load_data(stock_id, path)
     if df.empty: return None
@@ -176,19 +183,25 @@ def prepare_training_data_v2(stock_id, target_days=1, path=DB_PATH, keep_raw_pri
     # 5. Add Lags (Short memory is enough for day trading)
     df = add_lag_features_v2(df, lags=5)
     
-    # 6. Create Target
-    # Target: Next Day's Return
-    future_close = df['Close'].shift(-target_days)
-    df['Future_Return'] = (future_close - df['Close']) / df['Close']
+    # 6. Create Target (ONLY if not in prediction mode)
+    if not is_prediction_mode:
+        # Target: Next Day's Return
+        future_close = df['Close'].shift(-target_days)
+        df['Future_Return'] = (future_close - df['Close']) / df['Close']
+    else:
+        df['Future_Return'] = np.nan # Placeholder
     
     # 7. Clean up
-    # Drop raw price columns to prevent leakage/overfitting on absolute levels
-    # UNLESS keep_raw_prices is True (for backtesting)
     if not keep_raw_prices:
         raw_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'Type', 'Stock_ID']
         df = df.drop(columns=[c for c in raw_cols if c in df.columns])
     
-    df = df.dropna()
+    if is_prediction_mode:
+        # Drop rows where FEATURES are NaN (due to lags/rolling)
+        df = df.dropna(subset=['RSI'])
+    else:
+        # In training mode, we need valid targets
+        df = df.dropna()
     
     return df
 
