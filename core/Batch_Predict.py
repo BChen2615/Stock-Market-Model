@@ -181,7 +181,9 @@ def run_batch_prediction(force_update=False):
                 
                 results.append(row_result)
                 
-        except Exception:
+        except Exception as e:
+            if i < 5:
+                print(f"Error on {stock}: {e}")
             continue
             
     if results:
