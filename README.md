@@ -98,7 +98,7 @@ All features are ratio-based or normalized (e.g., `Close / SMA(20) - 1` rather t
 
 ### Generalization by design
 
-The model is trained on 22 sector-leader stocks and evaluated on a **randomly sampled set of completely different stocks**. Strong test performance (ROC-AUC ~0.58–0.62 across horizons) on these unseen stocks demonstrates the features capture generalizable patterns rather than stock-specific idiosyncrasies.
+The model is trained on 22 sector-leader stocks and evaluated on a **randomly sampled set of completely different stocks**. Strong test performance (ROC-AUC ~0.58–0.70 across horizons) on these unseen stocks demonstrates the features capture generalizable patterns rather than stock-specific idiosyncrasies.
 
 ### Realistic backtest cost model
 
