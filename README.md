@@ -8,7 +8,7 @@ An end-to-end machine learning system that scans the entire Taiwan Stock Exchang
 
 > **Live app** — Streamlit web dashboard with login, market radar, and individual stock analysis
 
-![AI Stock Radar](https://via.placeholder.com/900x450.png?text=AI+Stock+Radar+Dashboard)
+[demo](http://64.181.244.154:8501/) **\[Link is currently down due to the plan change of Oracle server\]**
 
 *Market Radar page: all stocks ranked by model confidence. Click any row to drill into the full technical analysis and prediction history.*
 
