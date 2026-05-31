@@ -18,7 +18,7 @@ from Feature_Engineering_V2 import prepare_training_data_v2, DB_PATH
 # --- CONFIG ---
 BASE_DIR = os.path.dirname(current_dir)
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
-MODEL_PATH = os.path.join(MODELS_DIR, 'xgb_universal.pkl')
+MODEL_PATH = os.path.join(MODELS_DIR, 'xgb_universal_1d.pkl')
 DB_FULL_PATH = os.path.join(BASE_DIR, 'data', 'twstock.db')
 
 # Test Stocks (Unseen during training)
