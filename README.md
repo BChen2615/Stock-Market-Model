@@ -8,7 +8,7 @@ An end-to-end machine learning system that scans the entire Taiwan Stock Exchang
 
 > **Live app** — Streamlit web dashboard with login, market radar, and individual stock analysis
 
-![AI Stock Radar](https://via.placeholder.com/900x450.png?text=AI+Stock+Radar+Dashboard)
+[demo](http://64.181.244.154:8501/) **\[Link is currently down due to the plan change of Oracle server\]**
 
 *Market Radar page: all stocks ranked by model confidence. Click any row to drill into the full technical analysis and prediction history.*
 
@@ -98,7 +98,7 @@ All features are ratio-based or normalized (e.g., `Close / SMA(20) - 1` rather t
 
 ### Generalization by design
 
-The model is trained on 22 sector-leader stocks and evaluated on a **randomly sampled set of completely different stocks**. Strong test performance (ROC-AUC ~0.58–0.62 across horizons) on these unseen stocks demonstrates the features capture generalizable patterns rather than stock-specific idiosyncrasies.
+The model is trained on 22 sector-leader stocks and evaluated on a **randomly sampled set of completely different stocks**. Strong test performance (ROC-AUC ~0.58–0.70 across horizons) on these unseen stocks demonstrates the features capture generalizable patterns rather than stock-specific idiosyncrasies.
 
 ### Realistic backtest cost model
 
