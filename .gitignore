@@ -3,4 +3,6 @@
 .idea/
 *_files/
 *.db
+.claude/
+__pycache__/
 
